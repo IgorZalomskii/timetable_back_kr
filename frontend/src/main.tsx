@@ -18,6 +18,7 @@ import {
 import "./style.css";
 import "./qa";
 import { lessonCount } from "./presentation";
+import { saveProfile, type Profile } from "./profile-save";
 
 const roles: Record<string, string> = {
   admin: "Администратор",
@@ -471,7 +472,7 @@ function App() {
           <a href="#profile">{roles[user.role]} <span aria-hidden="true">↗</span></a>
         </div>
         <ErrorBox error={error} />
-        {error instanceof ApiError && [0, 503].includes(error.status) && (
+        {error instanceof ApiError && (error.status === 0 || error.status >= 500) && (
           <button disabled={busy} onClick={async () => {
             if (!(await discardChanges())) return;
             await action(async () => acceptSession(await api<Session>("/auth/me")), "Состояние сверено с сервером");
@@ -1500,6 +1501,7 @@ function ProfilePage({ user, expiresAt, data, action, busy, acceptSession }: {
   const [group, setGroup] = useState(user.group_id?.toString() || data.groups?.find(x => x.active)?.id.toString() || "");
   const [teacher, setTeacher] = useState(user.teacher_id?.toString() || data.teachers?.find(x => x.active)?.id.toString() || "");
   const profileForm = useRef<HTMLFormElement>(null);
+  const [checkingSave, setCheckingSave] = useState(false);
   const changed = role !== user.role || name.trim() !== user.name ||
     (role === "student" && Number(group) !== user.group_id) ||
     (role === "teacher" && Number(teacher) !== user.teacher_id);
@@ -1519,12 +1521,20 @@ function ProfilePage({ user, expiresAt, data, action, busy, acceptSession }: {
           e.preventDefault();
           const form = e.currentTarget;
           action(async () => {
-            const payload: Record<string, unknown> = { role, name: name.trim() };
+            setCheckingSave(false);
+            const payload: Profile = { role, name: name.trim() };
             if (role === "student" && group) payload.group_id = Number(group);
             if (role === "teacher" && teacher) payload.teacher_id = Number(teacher);
-            const session = await api<Session>("/auth/profile", "PUT", payload);
-            dirtyForms.delete(form);
-            acceptSession(session);
+            try {
+              const session = await saveProfile(user.id, payload,
+                () => api<Session>("/auth/profile", "PUT", payload),
+                () => api<Session>("/auth/me", "GET", undefined, 5000),
+                () => setCheckingSave(true));
+              dirtyForms.delete(form);
+              acceptSession(session);
+            } finally {
+              setCheckingSave(false);
+            }
           }, "Роль и профиль сохранены", form);
         }}>
           <fieldset disabled={busy}>
@@ -1548,10 +1558,11 @@ function ProfilePage({ user, expiresAt, data, action, busy, acceptSession }: {
               {role === "teacher" && <DirectorySelect label="Преподаватель" kind="teachers" data={data} value={teacher} onChange={setTeacher} />}
             </div>
             <div className="row profile-actions">
-              <button className="primary" disabled={!changed || !name.trim()}>{busy ? "Сохраняем…" : "Применить роль и профиль"}</button>
+              <button className="primary" disabled={!changed || !name.trim()}>{busy ? (checkingSave ? "Проверяем сохранение…" : "Сохраняем…") : "Применить роль и профиль"}</button>
               <a className="button" href="#schedule">К расписанию</a>
             </div>
           </fieldset>
+          <p className="small muted" role="status" aria-live="polite">{checkingSave ? "Ответ задержался. Проверяем, сохранились ли выбранная роль и профиль. Повторно нажимать кнопку не нужно." : ""}</p>
         </form>
       </section>
       <section className="panel session-info">

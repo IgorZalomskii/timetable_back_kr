@@ -68,13 +68,14 @@ export async function api<T = unknown>(
   path: string,
   method = "GET",
   body?: unknown,
+  timeoutMs = 15000,
 ): Promise<T> {
   const { response, data } = await requestJson(import.meta.env.BASE_URL + "api/v1" + path, {
     method,
     credentials: "same-origin",
     headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf, "X-Requested-With": "schedule-app" },
     body: body === undefined ? undefined : JSON.stringify(body),
-  }).catch((error) => {
+  }, timeoutMs).catch((error) => {
     throw new ApiError(error.message, 0);
   });
   if (response.status === 401 && !path.startsWith("/auth/"))
