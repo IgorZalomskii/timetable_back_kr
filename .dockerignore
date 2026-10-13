@@ -1,0 +1,15 @@
+.git
+.env
+.env.*
+.venv
+.local
+.codex
+.unlazy
+**/__pycache__
+**/.pytest_cache
+frontend/node_modules
+frontend/dist
+tests
+deploy
+*.dump
+*.log

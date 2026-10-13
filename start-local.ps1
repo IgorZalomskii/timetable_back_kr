@@ -11,6 +11,7 @@ if ($Build -or -not (Test-Path -LiteralPath 'frontend\dist\index.html')) {
         if ($LASTEXITCODE -ne 0) { throw 'Frontend build failed (Node >=22.12 required)' }
     } finally { Pop-Location }
 }
+if (-not $env:REDIS_URL) { throw 'Set REDIS_URL to a running local Redis instance, or use docker compose up --build; see README.md' }
 & .\.venv\Scripts\python.exe scripts/devdb.py
 if ($LASTEXITCODE -ne 0) { throw 'Private PostgreSQL startup failed' }
 & .\.venv\Scripts\python.exe -m alembic upgrade head

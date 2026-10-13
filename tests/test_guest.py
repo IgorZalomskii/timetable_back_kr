@@ -4,7 +4,9 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, func, text, update, delete
 from sqlalchemy.orm import sessionmaker
-from fastapi import HTTPException
+from app.domain.errors import ApplicationError
+from app.bootstrap import limiter
+from app.application.common import bucket
 from sqlalchemy.exc import IntegrityError
 from test_api import database, engine, app
 from app.models import Workspace, User, Session, Group, Lesson, Schedule, Audit, LoginAttempt
@@ -187,20 +189,18 @@ def test_reset_expiry_cleanup_and_csrf():
         assert db.get(Workspace,1) is not None
 
 def test_guest_limits_and_cookie_flags(monkeypatch):
-    import app.main as main
+    import app.api.config as main
     import app.workspaces as scoped
     a,data=guest('admin')
     monkeypatch.setitem(scoped.LIMITS,Group,2)
     assert a.post('/api/v1/directories/groups',json={'name':'Too many'}).status_code==422
-    with Factory.begin() as db:
-        key=token_hash('guest:testclient')
-        db.add_all([LoginAttempt(key=key) for _ in range(9)])
+    limiter.client.set(limiter.key(bucket('guest','guest:testclient',10,900)),10,ex=900)
     c=TestClient(app,headers={'Origin':'http://testserver','X-Requested-With':'schedule-app'})
     assert c.post('/api/v1/auth/guest',json={}).status_code==429
     assert a.post('/api/v1/auth/guest',json={}).status_code==200
     monkeypatch.setattr(main,'PRODUCTION',True)
     monkeypatch.setattr(main,'COOKIE_PATH','/mireabackr')
-    with Factory.begin() as db: db.execute(text('DELETE FROM login_attempts'))
+    limiter.client.delete(limiter.key(bucket('guest','guest:testclient',10,900)))
     c=TestClient(app,base_url='https://testserver',headers={'Origin':'https://testserver','X-Requested-With':'schedule-app'})
     r=c.post('/api/v1/auth/guest',json={})
     assert r.status_code==200,r.text
@@ -208,14 +208,14 @@ def test_guest_limits_and_cookie_flags(monkeypatch):
     assert all(flag in cookie for flag in ('secure','httponly','samesite=strict','path=/mireabackr','max-age=604'))
 
 def test_reset_at_capacity_and_bulk_scope_guard(monkeypatch):
-    import app.demo as demo
+    import app.adapters.db.demo_repository as demo
     a,data=guest('admin')
     monkeypatch.setattr(demo,'MAX_WORKSPACES',1)
     assert a.post('/api/v1/auth/guest/reset',json={}).status_code==200
     with Factory.begin() as db:
         db.info['workspace_id']=data['user']['workspace_id']
         for statement in (update(Group).values(name='oops'),delete(Group)):
-            with pytest.raises(HTTPException): db.execute(statement)
+            with pytest.raises(ApplicationError): db.execute(statement)
 
 def test_legacy_session_is_rejected_and_guest_token_expires():
     with Factory.begin() as db:

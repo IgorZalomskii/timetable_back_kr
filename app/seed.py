@@ -6,7 +6,10 @@ from .db import SessionLocal
 from .models import Group, Teacher, Room, Subject, User, Period, Schedule
 from .schemas import LessonIn
 from .security import password_hash
-from .services import MOSCOW, create_lesson
+from .domain.lesson_policy import MOSCOW
+from .domain.values import RequestContext
+from .application.lessons import create
+from .adapters.db.uow import SqlUnitOfWork
 
 def seed():
     if os.environ.get('APP_ENV') == 'production':
@@ -24,6 +27,8 @@ def seed():
             db.add(User(username=login,role=role,name=name,password_hash=password_hash('Schedule-demo-2026!'),group_id=group_id,teacher_id=teacher_id))
         db.flush()
         admin=db.scalar(select(User).where(User.username=='admin'))
+        context=RequestContext(1,admin.id,admin.role)
+        uow=SqlUnitOfWork(db,context)
         today=datetime.now(MOSCOW).date()
         monday=today-timedelta(days=today.weekday())
         period=Period(name=f'Учебный период {today.year}',start=monday-timedelta(days=14),end=monday+timedelta(days=120))
@@ -36,7 +41,7 @@ def seed():
                 for slot in range(2):
                     idx=(day+slot)%3
                     start=datetime.combine(monday+timedelta(weeks=week,days=day),datetime.min.time(),MOSCOW)+timedelta(hours=9+slot*2)
-                    create_lesson(db,LessonIn(schedule_id=schedule.id,group_id=groups[0].id,teacher_id=teachers[idx].id,room_id=rooms[idx].id,subject_id=subjects[idx].id,starts=start,ends=start+timedelta(minutes=90)),admin)
+                    create(uow,context,LessonIn(schedule_id=schedule.id,group_id=groups[0].id,teacher_id=teachers[idx].id,room_id=rooms[idx].id,subject_id=subjects[idx].id,starts=start,ends=start+timedelta(minutes=90)))
         print('Local legacy fixtures created. Public guest mode does not use these password accounts.')
 
 if __name__=='__main__':

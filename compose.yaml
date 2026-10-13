@@ -1,0 +1,73 @@
+name: schedule-coursework
+x-app: &app
+  image: schedule-app:${APP_IMAGE_TAG:-local}
+  build:
+    context: .
+    args:
+      APP_BASE_PATH: ${APP_BASE_PATH:-/}
+  networks: [backend]
+  environment: &environment
+    FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1}
+    APP_ENV: ${APP_ENV:-development}
+    DATABASE_URL: postgresql+psycopg://schedule:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/schedule
+    REDIS_URL: redis://redis:6379/0
+    REDIS_CONNECT_TIMEOUT_MS: 250
+    REDIS_READ_TIMEOUT_MS: 250
+    PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:8187}
+    APP_BASE_PATH: ${APP_BASE_PATH:-/}
+    GUEST_MODE: ${GUEST_MODE:-1}
+services:
+  postgres:
+    image: postgres:15-bookworm
+    networks: [backend]
+    environment:
+      POSTGRES_DB: schedule
+      POSTGRES_USER: schedule
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U schedule -d schedule']
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
+  redis:
+    image: redis:7.4-bookworm
+    networks: [backend]
+    command: [redis-server, --save, '', --appendonly, 'no']
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
+  migrate:
+    <<: *app
+    command: [alembic, upgrade, head]
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+  app:
+    <<: *app
+    networks: [backend, frontend]
+    ports:
+      - '127.0.0.1:${APP_PORT:-8187}:8000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+volumes:
+  postgres-data:
+
+networks:
+  backend:
+    internal: true
+  frontend: {}

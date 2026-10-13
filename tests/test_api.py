@@ -9,6 +9,9 @@ from sqlalchemy.exc import IntegrityError
 from app.db import DATABASE_URL, APP_ENV, Base, get_db
 from sqlalchemy.engine import make_url
 from app.main import app
+from app.bootstrap import limiter, provide_services
+from app.api.dependencies import get_services
+from app.application.common import bucket
 from app.models import User, Group, Teacher, Room, Subject, Period, Schedule, Lesson, Session, LoginAttempt, Workspace
 from app.security import password_hash
 
@@ -22,6 +25,9 @@ Factory=sessionmaker(engine,expire_on_commit=False,info={'workspace_id':1})
 @pytest.fixture(autouse=True)
 def database(monkeypatch):
     monkeypatch.setenv('GUEST_MODE','0')
+    app.dependency_overrides[get_services]=provide_services
+    for key in limiter.client.scan_iter(match=limiter.namespace+':*'):
+        limiter.client.delete(key)
     if engine.url.database != 'schedule_test':
         raise RuntimeError('Refusing to clear a non-test database')
     with engine.begin() as connection:
@@ -174,7 +180,8 @@ def test_ip_limit_blocks_username_rotation_and_cleans_old_rows():
         assert c.post('/api/v1/auth/login',json={'username':f'nobody{i}','password':'bad'}).status_code==401
     assert c.post('/api/v1/auth/login',json={'username':'rotated','password':'bad'}).status_code==429
     with Factory() as db:
-        assert db.scalar(select(LoginAttempt).where(LoginAttempt.key=='expired')) is None
+        assert db.scalar(select(LoginAttempt).where(LoginAttempt.key=='expired')) is not None  # legacy rows are unused, retained for rollback
+    assert int(limiter.client.get(limiter.key(bucket('ip','ip:testclient',60,900)))) == 60
 
 
 def test_sessions_are_capped_and_expire():
@@ -210,7 +217,7 @@ def test_filters_and_dispatcher_rights():
 
 
 def test_production_cookie_flags(monkeypatch):
-    import app.main as main
+    import app.api.config as main
     monkeypatch.setattr(main,'PRODUCTION',True)
     monkeypatch.setattr(main,'COOKIE_PATH','/mireabackr')
     c=TestClient(app,base_url='https://testserver')

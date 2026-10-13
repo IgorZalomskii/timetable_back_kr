@@ -41,66 +41,39 @@
 | Часть | Используется |
 | --- | --- |
 | Сервер | Python, FastAPI, Pydantic |
-| Данные | PostgreSQL, SQLAlchemy, Alembic |
+| Данные | PostgreSQL 15, SQLAlchemy, Alembic |
+| Ограничение запросов | Redis, атомарный Lua script; Compose использует Redis 7.4 |
 | Клиент | React, TypeScript, Vite, CSS |
 | Проверки | pytest, HTTPX, Node.js test runner |
-| Развёртывание | Uvicorn, Nginx, systemd, HTTPS |
+| Развёртывание | Docker Compose, Uvicorn; внешний Nginx/HTTPS |
 
-Это одно приложение и одна база данных. Docker, Redis и отдельный брокер сообщений для запуска не нужны.
+Это модульный монолит: один FastAPI-процесс обслуживает API и React-клиент. PostgreSQL хранит данные; Redis хранит только временные счётчики ограничений запросов. Приложение не разделено на микросервисы.
 
 ## Локальный запуск
 
-Нужны Python 3.12+, Node.js 22.12+ и PostgreSQL 15+. Для фронтенд-тестов используйте Node.js 24.
-
-### Windows
+Основной воспроизводимый способ — Docker Compose. Образ сам собирает клиент; локальные Python и Node для этого способа не нужны.
 
 ```powershell
-git clone https://github.com/IgorZalomskii/timetable_back_kr.git
-cd timetable_back_kr
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.lock
-.\start-local.ps1 -Build
+Copy-Item .env.example .env
+# В .env задайте APP_ENV=development, PUBLIC_ORIGIN=http://localhost:8187,
+# APP_BASE_PATH=/ и собственный POSTGRES_PASSWORD (URL-safe либо URL-encoded).
+docker compose up --build -d
+docker compose ps
 ```
 
-Скрипт собирает клиент, создаёт отдельный PostgreSQL-кластер в `.local/postgres`, применяет миграции и запускает приложение. Системную службу PostgreSQL он не меняет.
+Откройте [localhost:8187](http://localhost:8187). Compose запускает PostgreSQL и Redis с healthcheck, выполняет `alembic upgrade head` отдельным одноразовым сервисом `migrate`, затем запускает приложение от пользователя с UID 10001. Импорт приложения не меняет схему.
 
-- Приложение: [localhost:8186](http://127.0.0.1:8186)
-- Документация API: [localhost:8186/docs](http://127.0.0.1:8186/docs)
+`docker compose down` останавливает стенд, сохраняя PostgreSQL volume. `docker compose up -d` запускает его снова. Не добавляйте `-v`, если данные нужно сохранить. У Redis отключены RDB и AOF: перезапуск сбрасывает квоты, но не расписание и историю. Образ может создать анонимный volume `/data`, однако приложение не использует его для сохранения счётчиков. Резервное копирование, восстановление и trusted proxy описаны в [deploy/README.md](deploy/README.md).
 
-По умолчанию PostgreSQL ищется в `C:\Program Files\PostgreSQL\15\bin`, порт локальной БД — `55439`. При другом пути или занятом порте задайте переменные перед запуском:
+При недоступном Redis уже запущенный сервер продолжает обслуживать чтение, health и предпросмотр серии. Изменения, включая новый вход, создание демо, профиль и выход, возвращают 503 с `Retry-After: 3`, не меняя PostgreSQL. После восстановления Redis запись работает без перезапуска приложения. Холодный старт требует доступных PostgreSQL, Redis и схемы 0002.
 
-```powershell
-$env:PG_BIN = 'C:\Program Files\PostgreSQL\16\bin'
-$env:SCHEDULE_PG_PORT = '55839'
-.\start-local.ps1 -Build
-```
+Для запуска без контейнера нужны Python 3.12+, Node.js 24, PostgreSQL 15+ и Redis. Установите `requirements.lock`, соберите клиент (`npm ci`, `npm run build` в `frontend`), задайте `DATABASE_URL`, `REDIS_URL`, `APP_ENV=development`, примените миграции и запустите `python -m uvicorn app.main:app --host 127.0.0.1 --port 8186`. Windows-скрипт `start-local.ps1 -Build` умеет подготовить отдельный локальный PostgreSQL, но требует заранее запущенного Redis и заданного `REDIS_URL`.
 
-Пароль создаётся локально; подключение записывается в `.env`. Эти файлы исключены из Git. Повторный запуск без пересборки: `.\start-local.ps1`. Ctrl+C останавливает приложение, но не локальную БД.
-
-### Linux и macOS
-
-Используйте существующий локальный PostgreSQL. Создайте отдельные базы `schedule` и `schedule_test`, установите расширение `btree_gist` в обеих. Не подключайте тесты к рабочему серверу.
-
-```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.lock
-cp .env.example .env
-# Заполните DATABASE_URL локальным подключением.
-# Для разработки установите APP_ENV=development и уберите PUBLIC_ORIGIN.
-cd frontend
-npm ci
-npm run build
-cd ..
-python -m alembic upgrade head
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8186
-```
-
-Для разработки клиента запустите `npm run dev` из `frontend`. До запуска бэкенда задайте ему `PUBLIC_ORIGIN=http://127.0.0.1:5186`; Vite перенаправит запросы API на порт 8186.
+Для разработки клиента Vite использует порт 5186 и API на 8186; серверу задайте `PUBLIC_ORIGIN=http://127.0.0.1:5186`.
 
 ## Проверки
 
-После подготовки локальной БД:
+После подготовки отдельных PostgreSQL `schedule_test` и Redis для тестов:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
@@ -115,11 +88,15 @@ npm run build
 ## Структура проекта
 
 ```text
-app/                 API, модели, права доступа и правила расписания
+app/domain/          чистые правила занятия и серии
+app/application/     сценарии, DTO, Protocol-порты и управление транзакцией
+app/adapters/        PostgreSQL, Redis и криптография
+app/api/             HTTP-маршруты, cookie, CSRF и ответы
+app/bootstrap.py     сборка конкретных зависимостей
 migrations/          схема PostgreSQL и миграции Alembic
 frontend/src/        интерфейс и клиент API
 frontend/tests/      тесты обработки ответов и текстов интерфейса
-tests/               интеграционные тесты с PostgreSQL
+tests/               unit, import boundaries, PostgreSQL/Redis и API contract
 scripts/             локальная БД, проверка миграций и сценарные тесты
 deploy/              шаблоны Nginx и systemd
 docs/                архитектура, тестирование и устройство интерфейса
